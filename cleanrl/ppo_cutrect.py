@@ -121,8 +121,10 @@ class Agent(nn.Module):
     def get_value(self, x):
         return self.critic(x)
 
-    def get_action_and_value(self, x, action=None):
+    def get_action_and_value(self, x, action_masks, action=None):
         logits = self.actor(x)
+        action_masks = action_masks.type(torch.BoolTensor).to(device)
+        logits = torch.where(action_masks, logits, torch.tensor(-1e+9).to(device))
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
@@ -170,6 +172,7 @@ if __name__ == "__main__":
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
+    action_masks_all = torch.zeros((args.num_steps, args.num_envs, envs.single_action_space.n)).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -194,11 +197,20 @@ if __name__ == "__main__":
             obs[step] = next_obs
             dones[step] = next_done
 
+            action_masks = [env.env.get_action_mask() for env in envs.envs]
+            action_masks = torch.Tensor(np.array(action_masks))
+            action_masks = action_masks.type(torch.BoolTensor).to(device)
+            
+
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs.reshape(args.num_envs, -1))
+
+                action, logprob, _, value = agent.get_action_and_value(
+                                                next_obs.reshape(args.num_envs, -1), action_masks)
                 values[step] = value.flatten()
+
             actions[step] = action
+            action_masks_all[step] = action_masks
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
@@ -209,7 +221,6 @@ if __name__ == "__main__":
             if "final_info" in info:
                 for item in info["final_info"]:
                     if item and "episode" in item:
-                        print(f"global_step={global_step}, episodic_return={item['episode']['r']}")
                         writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
             
@@ -233,6 +244,7 @@ if __name__ == "__main__":
         b_obs = b_obs.reshape((-1, np.prod(envs.single_observation_space.shape)))
         b_logprobs = logprobs.reshape(-1)
         b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
+        b_actions_masks = action_masks_all.reshape((-1,envs.single_action_space.n))
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
@@ -245,8 +257,9 @@ if __name__ == "__main__":
             for start in range(0, args.batch_size, args.minibatch_size):
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
-
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions.long()[mb_inds])
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds],
+                                                                              b_actions_masks[mb_inds],
+                                                                              b_actions.long()[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
