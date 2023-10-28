@@ -14,8 +14,8 @@ import torch.optim as optim
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 import sys
-sys.path.insert(0, "../rectangle/")
-from rectangle_cutting_env import RectangleGridEnv
+sys.path.insert(0, "../simple/")
+from mapping_simple_action_mask_ave_env import MappingSimpleActionMaskALLAVEEnv
 
 
 
@@ -84,7 +84,7 @@ def parse_args():
 def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
         
-        env = RectangleGridEnv()
+        env = MappingSimpleActionMaskALLAVEEnv()
         env = gym.wrappers.RecordEpisodeStatistics(env)
         # env.seed(seed)
         env.action_space.seed(seed)
@@ -110,25 +110,38 @@ class Agent(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(64, 1), std=1.0),
         )
-        self.actor = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, envs.single_action_space.n), std=0.01),
-        )
+        num_actions = envs.single_action_space.nvec
+        self.actor_heads = nn.ModuleList([
+            nn.Sequential(
+                layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+                nn.Tanh(),
+                layer_init(nn.Linear(64, 64)),
+                nn.Tanh(),
+                layer_init(nn.Linear(64, n), std=0.01),
+            ) for n in num_actions
+        ])
 
     def get_value(self, x):
         return self.critic(x)
 
     def get_action_and_value(self, x, action_masks, action=None):
-        logits = self.actor(x)
+        logits_list = [actor_head(x) for actor_head in self.actor_heads]
+        logits_0 = logits_list[0]
+        probs_0 = Categorical(logits=logits_0)
+        
+        logits_1 = logits_list[1]
         action_masks = action_masks.type(torch.BoolTensor).to(device)
-        logits = torch.where(action_masks, logits, torch.tensor(-1e+9).to(device))
-        probs = Categorical(logits=logits)
+        logits_1 = torch.where(action_masks, logits_1, torch.tensor(-1e+9).to(device))
+        probs_1 = Categorical(logits=logits_1)
+        probs_list = [probs_0, probs_1]
+        
         if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+            action = torch.stack([probs.sample() for probs in probs_list], dim=-1)
+        log_probs = torch.stack([probs.log_prob(act) for probs, act in zip(probs_list, torch.unbind(actions, dim=-1))], dim=-1)
+        total_log_prob = log_probs.sum(dim=-1)
+        entropy = sum([probs.entropy() for probs in probs_list])
+        
+        return actions, total_log_prob, entropy, self.critic(x)
 
 
 if __name__ == "__main__":
@@ -170,8 +183,10 @@ if __name__ == "__main__":
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
+    
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
+    num_action_dimensions = len(envs.single_action_space.nvec)
+    actions = torch.zeros((args.num_steps, args.num_envs, num_action_dimensions)).to(device)
     action_masks_all = torch.zeros((args.num_steps, args.num_envs, envs.single_action_space.n)).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
