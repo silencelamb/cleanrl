@@ -253,8 +253,16 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     next_obs = torch.Tensor(envs.reset()[0]).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
     num_updates = args.total_timesteps // (args.batch_size * world_size)
+    
+    exception_caught = False  # Flag to indicate if an exception was caught
 
     for update in range(1, num_updates + 1):
+        if exception_caught:
+            # Reset the environment and start over
+            next_obs = torch.Tensor(envs.reset()[0]).to(device)
+            next_done = torch.zeros(args.num_envs).to(device)
+            exception_caught = False  # Reset the flag
+            
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (update - 1.0) / num_updates
@@ -281,8 +289,13 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            next_obs, reward, done, truncted, info = envs.step(action.cpu().numpy())
-            rewards[step] = torch.tensor(reward).to(device).view(-1)
+            try:
+                next_obs, reward, done, truncted, info = envs.step(action.cpu().numpy())
+                rewards[step] = torch.tensor(reward).to(device).view(-1)
+            except Exception as e:
+                print(f"Exception occurred: {e}")
+                exception_caught = True
+                break  # Break out of the steps loop
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
 
             if "final_info" in info:
@@ -290,6 +303,9 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                     if item and "episode" in item and local_rank == 0:
                         writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
+
+        if exception_caught:
+            continue  # Skip the rest of the code in this update and start over
 
         print(
             f"local_rank: {local_rank}, action.sum(): {action.sum()}, update: {update}, agent.actor.weight.sum(): {agent.actor.weight.sum()}"
