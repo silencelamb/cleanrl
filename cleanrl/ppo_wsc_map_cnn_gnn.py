@@ -13,9 +13,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
+from torch_geometric.nn import SAGEConv
+from torch_geometric.nn import global_mean_pool
 import sys
 sys.path.insert(0, "../")
 from mapping_env import WSCMappingEnv
+
 
 
 
@@ -103,8 +106,10 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
+        graph_feature_dim = envs.envs[0].env.get_graph_feature_dim()
         channel = envs.single_observation_space.shape[0]
         features_dim = 512
+        hidden_channels = 512
         self.cnn = nn.Sequential(
             layer_init(nn.Conv2d(channel, 256, kernel_size=3, stride=1, padding=1)),
             nn.ReLU(),
@@ -116,30 +121,49 @@ class Agent(nn.Module):
             nn.ReLU(),
             nn.Flatten(),
         )
-        # Compute shape by doing one forward pass
+
+        # Initialize GraphSAGE
+        self.graph_sage = GraphSAGE(graph_feature_dim, hidden_channels)
+        
+        # Compute cnn feature lengths of CNN by doing one forward pass
         with torch.no_grad():
             n_flatten = self.cnn(torch.as_tensor(envs.single_observation_space.sample()[None]).float()).shape[1]
 
-        self.linear = nn.Sequential(layer_init(nn.Linear(n_flatten, features_dim)), nn.ReLU())
+        # Concatenate CNN features with GraphSAGE features
+        concatenated_features_dim = n_flatten + hidden_channels
+        
+        # Adjust linear layer to accommodate concatenated features
         self.critic = nn.Sequential(
-            self.cnn,
-            self.linear,
-            layer_init(nn.Linear(features_dim, 1), std=1.0),
+            layer_init(nn.Linear(concatenated_features_dim, features_dim)),
+            nn.ReLU(),
+            layer_init(nn.Linear(features_dim, 1))  # Assumes you're outputting a single value for the critic
         )
         num_actions = envs.single_action_space.nvec
         self.actor_heads = nn.ModuleList([
             nn.Sequential(
-                self.cnn,
-                self.linear,
+                layer_init(nn.Linear(concatenated_features_dim, features_dim)),
                 layer_init(nn.Linear(features_dim, n), std=0.01),
             ) for n in num_actions
         ])
 
-    def get_value(self, x):
-        return self.critic(x)
+    def get_value(self, x, graph_data):
+        cnn_features = self.cnn(x)
+        graph_features = self.graph_sage(graph_data.x, graph_data.edge_index)
+        graph_features_mean = graph_features.mean(dim=0, keepdim=True)
+        graph_features_mean = graph_features_mean.expand(cnn_features.size(0), -1)
+        # Concatenate features along the feature dimension
+        combined_features = torch.cat((cnn_features, graph_features_mean), dim=1)
+        return self.critic(combined_features)
 
-    def get_action_and_value(self, x, action_masks, action=None):
-        logits_list = [actor_head(x) for actor_head in self.actor_heads]
+    def get_action_and_value(self, x, graph_data, action_masks, action=None):
+        cnn_features = self.cnn(x)
+        graph_features = self.graph_sage(graph_data.x, graph_data.edge_index)
+        graph_features_mean = graph_features.mean(dim=0, keepdim=True)
+        graph_features_mean = graph_features_mean.expand(cnn_features.size(0), -1)
+        # Concatenate features along the feature dimension
+        combined_features = torch.cat((cnn_features, graph_features_mean), dim=1)
+        
+        logits_list = [actor_head(combined_features) for actor_head in self.actor_heads]
         logits_0 = logits_list[0]
         probs_0 = Categorical(logits=logits_0)
         
@@ -154,7 +178,43 @@ class Agent(nn.Module):
         total_log_prob = log_probs.sum(dim=-1)
         entropy = sum([probs.entropy() for probs in probs_list])
         
-        return action, total_log_prob, entropy, self.critic(x)
+        # Now pass the concatenated features into the critic
+        value = self.critic(combined_features)
+        return action, total_log_prob, entropy, value
+
+
+
+
+# 创建GraphSAGE模型
+class GraphSAGE(nn.Module):
+    def __init__(self, in_channels, hidden_channels):
+        super(GraphSAGE, self).__init__()
+        self.conv1 = SAGEConv(in_channels, hidden_channels, normalize=True)
+        self.conv2 = SAGEConv(hidden_channels, hidden_channels, normalize=True)
+
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index).relu()
+        x = self.conv2(x, edge_index).relu()
+        return x
+
+"""GraphSAGE Example Begin
+# 假设 edge_index 是一个 [2, E] 大小的 tensor, 其中 E 是边的数量
+# node_features 是一个 [N, F] 大小的 tensor, 其中 N 是节点的数量, F 是每个节点的特征数量
+import torch
+from torch_geometric.data import Data
+edge_index = torch.rand((1000, 128), device="cuda:6")
+node_features=torch.randint((2, 100), device="cuda:6")
+
+# 创建图数据
+data = Data(x=node_features, edge_index=edge_index)
+
+# 初始化模型
+model = GraphSAGE(in_channels=node_features.size(1), hidden_channels=16, out_channels=2)
+
+# 前向传播以提取特征
+graph_features = model(data)
+GraphSAGE Example End"""
+
 
 
 if __name__ == "__main__":
@@ -191,7 +251,7 @@ if __name__ == "__main__":
         [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
     )
     # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-
+    graph_data = envs.envs[0].env.get_graph_data().to(device)
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
@@ -240,8 +300,7 @@ if __name__ == "__main__":
             # ALGO LOGIC: action logic
             with torch.no_grad():
 
-                action, logprob, _, value = agent.get_action_and_value(
-                                                next_obs, action_masks)
+                action, logprob, _, value = agent.get_action_and_value(next_obs, graph_data, action_masks)
                 values[step] = value.flatten()
             actions[step] = action
             action_masks_all[step] = action_masks
@@ -268,7 +327,7 @@ if __name__ == "__main__":
 
         # bootstrap value if not done
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
+            next_value = agent.get_value(next_obs, graph_data).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
@@ -299,6 +358,7 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds],
+                                                                              graph_data,
                                                                               b_actions_masks[mb_inds],
                                                                               b_actions.long()[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds]
