@@ -192,15 +192,15 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         if args.track:
             import wandb
 
-            # wandb.init(
-            #     project=args.wandb_project_name,
-            #     entity=args.wandb_entity,
-            #     sync_tensorboard=True,
-            #     config=vars(args),
-            #     name=run_name,
-            #     monitor_gym=True,
-            #     save_code=True,
-            # )
+            wandb.init(
+                project=args.wandb_project_name,
+                entity=args.wandb_entity,
+                sync_tensorboard=True,
+                config=vars(args),
+                name=run_name,
+                monitor_gym=True,
+                save_code=True,
+            )
         writer = SummaryWriter(f"runs/{run_name}")
         writer.add_text(
             "hyperparameters",
