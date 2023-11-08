@@ -74,6 +74,10 @@ def parse_args():
         help="the maximum norm for the gradient clipping")
     parser.add_argument("--target-kl", type=float, default=None,
         help="the target KL divergence threshold")
+    parser.add_argument("--model-type", type=str, default="gpt",
+        help="fixed model type, used in fix one graph mode")
+    parser.add_argument("--model-size", type=str, default="350M",
+        help="fixed model size, used in fix one graph mode")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -192,6 +196,11 @@ if __name__ == "__main__":
     )
     # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
+    for i in range(args.num_envs):
+        # set the model type and size, so that the env can get the correct reward
+        print(f"Using {args.model_type} {args.model_size}")
+        envs.envs[i].env.set_model_type_size(args.model_type, args.model_size)
+        
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 

@@ -80,6 +80,10 @@ def parse_args():
         help="the device ids that subprocess workers will use")
     parser.add_argument("--backend", type=str, default="nccl", choices=["gloo", "nccl", "mpi"],
         help="the id of the environment")
+    parser.add_argument("--model-type", type=str, default="gpt",
+        help="fixed model type, used in fix one graph mode")
+    parser.add_argument("--model-size", type=str, default="350M",
+        help="fixed model size, used in fix one graph mode")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -234,7 +238,13 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
     )
     # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-
+    
+    for i in range(args.num_envs):
+        # set the model type and size, so that the env can get the correct reward
+        if local_rank == 0:
+            print(f"Using {args.model_type} {args.model_size}")
+        envs.envs[i].env.set_model_type_size(args.model_type, args.model_size)
+        
     agent = Agent(envs).to(device)
     torch.manual_seed(args.seed)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
