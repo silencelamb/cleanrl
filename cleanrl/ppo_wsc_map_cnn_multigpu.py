@@ -147,8 +147,11 @@ class Agent(nn.Module):
     def get_action_and_value(self, x, action_masks, action=None):
         logits_list = [actor_head(x) for actor_head in self.actor_heads]
         logits_0 = logits_list[0]
-        probs_0 = Categorical(logits=logits_0)
+        # if local_rank == 0:
+        #     print(f"logits_0: {logits_0}")
         
+        probs_0 = Categorical(logits=logits_0)
+
         logits_1 = logits_list[1]
         action_masks = action_masks.type(torch.BoolTensor).to(device)
         logits_1 = torch.where(action_masks, logits_1, torch.tensor(-1e+9).to(device))
@@ -298,18 +301,20 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                 break  # Break out of the steps loop
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
 
-            if "final_info" in info:
+            if local_rank == 0 and "final_info" in info:
                 for item in info["final_info"]:
-                    if item and "episode" in item and local_rank == 0:
+                    if item and "episode" in item:
                         writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
 
         if exception_caught:
             continue  # Skip the rest of the code in this update and start over
 
-        print(
-            f"local_rank: {local_rank}, action.sum(): {action.sum()}, update: {update}, agent.actor.weight.sum(): {agent.actor.weight.sum()}"
-        )
+        print(f"local_rank: {local_rank}, action.sum(): {action.sum()}, update: {update}")
+        print(f"agent.actor_heads[0][0][0].weight.sum(): {agent.actor_heads[0][0][0].weight.sum()}")
+        print(f"agent.actor_heads[0][1][0].weight.sum(): {agent.actor_heads[0][1][0].weight.sum()}")
+        print(f"agent.actor_heads[1][0][0].weight.sum(): {agent.actor_heads[1][0][0].weight.sum()}")
+        print(f"agent.actor_heads[1][1][0].weight.sum(): {agent.actor_heads[1][1][0].weight.sum()}")
                     
         # bootstrap value if not done
         with torch.no_grad():
