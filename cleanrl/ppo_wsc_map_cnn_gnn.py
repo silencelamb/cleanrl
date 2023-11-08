@@ -20,8 +20,6 @@ sys.path.insert(0, "../")
 from mapping_env import WSCMappingEnv
 
 
-
-
 def parse_args():
     # fmt: off
     parser = argparse.ArgumentParser()
@@ -183,8 +181,6 @@ class Agent(nn.Module):
         return action, total_log_prob, entropy, value
 
 
-
-
 # 创建GraphSAGE模型
 class GraphSAGE(nn.Module):
     def __init__(self, in_channels, hidden_channels):
@@ -214,7 +210,6 @@ model = GraphSAGE(in_channels=node_features.size(1), hidden_channels=16, out_cha
 # 前向传播以提取特征
 graph_features = model(data)
 GraphSAGE Example End"""
-
 
 
 if __name__ == "__main__":

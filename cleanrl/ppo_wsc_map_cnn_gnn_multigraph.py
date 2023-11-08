@@ -3,22 +3,21 @@ import argparse
 import os
 import random
 import time
-import warnings
 from distutils.util import strtobool
 
 import gymnasium as gym
 # import gym
 import numpy as np
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
+from torch_geometric.nn import SAGEConv
+from torch_geometric.nn import global_mean_pool
 import sys
 sys.path.insert(0, "../")
 from mapping_env import WSCMappingEnv
-
 
 
 def parse_args():
@@ -76,10 +75,8 @@ def parse_args():
         help="the maximum norm for the gradient clipping")
     parser.add_argument("--target-kl", type=float, default=None,
         help="the target KL divergence threshold")
-    parser.add_argument("--device-ids", nargs="+", default=[],
-        help="the device ids that subprocess workers will use")
-    parser.add_argument("--backend", type=str, default="nccl", choices=["gloo", "nccl", "mpi"],
-        help="the id of the environment")
+    parser.add_argument("--num-updates-per-graph", type=int, default=100,
+        help="update the number times for one graph then switch to another graph")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -109,8 +106,10 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
+        graph_feature_dim = envs.envs[0].env.get_graph_feature_dim()
         channel = envs.single_observation_space.shape[0]
         features_dim = 512
+        hidden_channels = 512
         self.cnn = nn.Sequential(
             layer_init(nn.Conv2d(channel, 256, kernel_size=3, stride=1, padding=1)),
             nn.ReLU(),
@@ -122,36 +121,52 @@ class Agent(nn.Module):
             nn.ReLU(),
             nn.Flatten(),
         )
-        # Compute shape by doing one forward pass
+
+        # Initialize GraphSAGE
+        self.graph_sage = GraphSAGE(graph_feature_dim, hidden_channels)
+        
+        # Compute cnn feature lengths of CNN by doing one forward pass
         with torch.no_grad():
             n_flatten = self.cnn(torch.as_tensor(envs.single_observation_space.sample()[None]).float()).shape[1]
 
-        self.linear = nn.Sequential(layer_init(nn.Linear(n_flatten, features_dim)), nn.ReLU())
+        # Concatenate CNN features with GraphSAGE features
+        concatenated_features_dim = n_flatten + hidden_channels
+        
+        # Adjust linear layer to accommodate concatenated features
         self.critic = nn.Sequential(
-            self.cnn,
-            self.linear,
-            layer_init(nn.Linear(features_dim, 1), std=1.0),
+            layer_init(nn.Linear(concatenated_features_dim, features_dim)),
+            nn.ReLU(),
+            layer_init(nn.Linear(features_dim, 1))  # Assumes you're outputting a single value for the critic
         )
         num_actions = envs.single_action_space.nvec
         self.actor_heads = nn.ModuleList([
             nn.Sequential(
-                self.cnn,
-                self.linear,
+                layer_init(nn.Linear(concatenated_features_dim, features_dim)),
                 layer_init(nn.Linear(features_dim, n), std=0.01),
             ) for n in num_actions
         ])
 
-    def get_value(self, x):
-        return self.critic(x)
+    def get_value(self, x, graph_data):
+        cnn_features = self.cnn(x)
+        graph_features = self.graph_sage(graph_data.x, graph_data.edge_index)
+        graph_features_mean = graph_features.mean(dim=0, keepdim=True)
+        graph_features_mean = graph_features_mean.expand(cnn_features.size(0), -1)
+        # Concatenate features along the feature dimension
+        combined_features = torch.cat((cnn_features, graph_features_mean), dim=1)
+        return self.critic(combined_features)
 
-    def get_action_and_value(self, x, action_masks, action=None):
-        logits_list = [actor_head(x) for actor_head in self.actor_heads]
-        logits_0 = logits_list[0]
-        # if local_rank == 0:
-        #     print(f"logits_0: {logits_0}")
+    def get_action_and_value(self, x, graph_data, action_masks, action=None):
+        cnn_features = self.cnn(x)
+        graph_features = self.graph_sage(graph_data.x, graph_data.edge_index)
+        graph_features_mean = graph_features.mean(dim=0, keepdim=True)
+        graph_features_mean = graph_features_mean.expand(cnn_features.size(0), -1)
+        # Concatenate features along the feature dimension
+        combined_features = torch.cat((cnn_features, graph_features_mean), dim=1)
         
+        logits_list = [actor_head(combined_features) for actor_head in self.actor_heads]
+        logits_0 = logits_list[0]
         probs_0 = Categorical(logits=logits_0)
-
+        
         logits_1 = logits_list[1]
         action_masks = action_masks.type(torch.BoolTensor).to(device)
         logits_1 = torch.where(action_masks, logits_1, torch.tensor(-1e+9).to(device))
@@ -163,80 +178,78 @@ class Agent(nn.Module):
         total_log_prob = log_probs.sum(dim=-1)
         entropy = sum([probs.entropy() for probs in probs_list])
         
-        return action, total_log_prob, entropy, self.critic(x)
+        # Now pass the concatenated features into the critic
+        value = self.critic(combined_features)
+        return action, total_log_prob, entropy, value
+
+
+# 创建GraphSAGE模型
+class GraphSAGE(nn.Module):
+    def __init__(self, in_channels, hidden_channels):
+        super(GraphSAGE, self).__init__()
+        self.conv1 = SAGEConv(in_channels, hidden_channels, normalize=True)
+        self.conv2 = SAGEConv(hidden_channels, hidden_channels, normalize=True)
+
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index).relu()
+        x = self.conv2(x, edge_index).relu()
+        return x
+
+"""GraphSAGE Example Begin
+# 假设 edge_index 是一个 [2, E] 大小的 tensor, 其中 E 是边的数量
+# node_features 是一个 [N, F] 大小的 tensor, 其中 N 是节点的数量, F 是每个节点的特征数量
+import torch
+from torch_geometric.data import Data
+edge_index = torch.rand((1000, 128), device="cuda:6")
+node_features=torch.randint((2, 100), device="cuda:6")
+
+# 创建图数据
+data = Data(x=node_features, edge_index=edge_index)
+
+# 初始化模型
+model = GraphSAGE(in_channels=node_features.size(1), hidden_channels=16, out_channels=2)
+
+# 前向传播以提取特征
+graph_features = model(data)
+GraphSAGE Example End"""
 
 
 if __name__ == "__main__":
-    # torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
-    # taken from https://pytorch.org/docs/stable/elastic/run.html
-    local_rank = int(os.getenv("LOCAL_RANK", "0"))
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
     args = parse_args()
-    args.world_size = world_size
-    args.num_envs = int(args.num_envs / world_size)
-    args.batch_size = int(args.num_envs * args.num_steps)
-    args.minibatch_size = int(args.batch_size // args.num_minibatches)
-    if world_size > 1:
-        dist.init_process_group(args.backend, rank=local_rank, world_size=world_size)
-    else:
-        warnings.warn(
-            """
-Not using distributed mode!
-If you want to use distributed mode, please execute this script with 'torchrun'.
-E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py`
-        """
-        )
-    print(f"================================")
-    print(f"args.num_envs: {args.num_envs}, args.batch_size: {args.batch_size}, args.minibatch_size: {args.minibatch_size}")
-    
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-    writer = None
-    if local_rank == 0:
-        if args.track:
-            import wandb
+    if args.track:
+        import wandb
 
-            wandb.init(
-                project=args.wandb_project_name,
-                entity=args.wandb_entity,
-                sync_tensorboard=True,
-                config=vars(args),
-                name=run_name,
-                monitor_gym=True,
-                save_code=True,
-            )
-        writer = SummaryWriter(f"runs/{run_name}")
-        writer.add_text(
-            "hyperparameters",
-            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        wandb.init(
+            project=args.wandb_project_name,
+            entity=args.wandb_entity,
+            sync_tensorboard=True,
+            config=vars(args),
+            name=run_name,
+            monitor_gym=True,
+            save_code=True,
         )
+    writer = SummaryWriter(f"runs/{run_name}")
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+    )
 
     # TRY NOT TO MODIFY: seeding
-    # CRUCIAL: note that we needed to pass a different seed for each data parallelism worker
-    args.seed += local_rank
     random.seed(args.seed)
     np.random.seed(args.seed)
-    torch.manual_seed(args.seed - local_rank)
+    torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    if len(args.device_ids) > 0:
-        assert len(args.device_ids) == world_size, "you must specify the same number of device ids as `--nproc_per_node`"
-        device = torch.device(f"cuda:{args.device_ids[local_rank]}" if torch.cuda.is_available() and args.cuda else "cpu")
-    else:
-        device_count = torch.cuda.device_count()
-        if device_count < world_size:
-            device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-        else:
-            device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() and args.cuda else "cpu")
-
+    device = torch.device("cuda:6" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
         [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
     )
     # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-
+    
     agent = Agent(envs).to(device)
-    torch.manual_seed(args.seed)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -255,11 +268,28 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     start_time = time.time()
     next_obs = torch.Tensor(envs.reset()[0]).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
-    num_updates = args.total_timesteps // (args.batch_size * world_size)
+    num_updates = args.total_timesteps // args.batch_size
     
     exception_caught = False  # Flag to indicate if an exception was caught
+    graph_num = envs.envs[0].env.num_graphs
+    cur_graph_idx = 0
+    print("Shuffling graphs")
+    envs.envs[0].env.shuffle_graphs(seed=args.seed)
 
     for update in range(1, num_updates + 1):
+        if update % args.num_updates_per_graph == 1:
+            # it is time to change a graph
+            print(f"Update: {update} Switching to Graph ID {cur_graph_idx}, Model: " +
+                  f"{envs.envs[0].env.GraphDataSet[cur_graph_idx].model_type} "+
+                  f"{envs.envs[0].env.GraphDataSet[cur_graph_idx].model_size}")
+            graph_data = envs.envs[0].env.get_graph_data(cur_graph_idx).to(device)
+            cur_graph_idx += 1
+        if cur_graph_idx == graph_num:
+            # it is time to shuffle graphs
+            print(f"Update: {update}, Shuffling graphs")
+            cur_graph_idx = 0
+            envs.envs[0].env.shuffle_graphs(seed=update+args.seed)
+        
         if exception_caught:
             # Reset the environment and start over
             next_obs = torch.Tensor(envs.reset()[0]).to(device)
@@ -273,7 +303,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             optimizer.param_groups[0]["lr"] = lrnow
 
         for step in range(0, args.num_steps):
-            global_step += 1 * args.num_envs * world_size
+            global_step += 1 * args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
 
@@ -284,8 +314,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             # ALGO LOGIC: action logic
             with torch.no_grad():
 
-                action, logprob, _, value = agent.get_action_and_value(
-                                                next_obs, action_masks)
+                action, logprob, _, value = agent.get_action_and_value(next_obs, graph_data, action_masks)
                 values[step] = value.flatten()
             actions[step] = action
             action_masks_all[step] = action_masks
@@ -301,24 +330,18 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                 break  # Break out of the steps loop
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
 
-            if local_rank == 0 and "final_info" in info:
+            if "final_info" in info:
                 for item in info["final_info"]:
                     if item and "episode" in item:
                         writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
-
+        
         if exception_caught:
             continue  # Skip the rest of the code in this update and start over
 
-        print(f"local_rank: {local_rank}, action.sum(): {action.sum()}, update: {update}")
-        print(f"agent.actor_heads[0][0][0].weight.sum(): {agent.actor_heads[0][0][0].weight.sum()}")
-        print(f"agent.actor_heads[0][1][0].weight.sum(): {agent.actor_heads[0][1][0].weight.sum()}")
-        print(f"agent.actor_heads[1][0][0].weight.sum(): {agent.actor_heads[1][0][0].weight.sum()}")
-        print(f"agent.actor_heads[1][1][0].weight.sum(): {agent.actor_heads[1][1][0].weight.sum()}")
-                    
         # bootstrap value if not done
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
+            next_value = agent.get_value(next_obs, graph_data).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
@@ -349,6 +372,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds],
+                                                                              graph_data,
                                                                               b_actions_masks[mb_inds],
                                                                               b_actions.long()[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds]
@@ -389,22 +413,6 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
 
                 optimizer.zero_grad()
                 loss.backward()
-                if world_size > 1:
-                    # batch allreduce ops: see https://github.com/entity-neural-network/incubator/pull/220
-                    all_grads_list = []
-                    for param in agent.parameters():
-                        if param.grad is not None:
-                            all_grads_list.append(param.grad.view(-1))
-                    all_grads = torch.cat(all_grads_list)
-                    dist.all_reduce(all_grads, op=dist.ReduceOp.SUM)
-                    offset = 0
-                    for param in agent.parameters():
-                        if param.grad is not None:
-                            param.grad.data.copy_(
-                                all_grads[offset : offset + param.numel()].view_as(param.grad.data) / world_size
-                            )
-                            offset += param.numel()
-                            
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
 
@@ -417,20 +425,16 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        if local_rank == 0:        
-            writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
-            writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-            writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-            writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-            writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
-            writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-            writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-            writer.add_scalar("losses/explained_variance", explained_var, global_step)
-            print("SPS:", int(global_step / (time.time() - start_time)))
-            writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+        writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+        writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
+        writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
+        writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
+        writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
+        writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
+        writer.add_scalar("losses/explained_variance", explained_var, global_step)
+        print("SPS:", int(global_step / (time.time() - start_time)))
+        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
     envs.close()
-    if local_rank == 0:
-        writer.close()
-        if args.track:
-            wandb.finish()
+    writer.close()
