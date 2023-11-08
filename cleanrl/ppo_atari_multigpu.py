@@ -6,7 +6,8 @@ import time
 import warnings
 from distutils.util import strtobool
 
-import gym
+import gymnasium as gym
+# import gym
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -81,7 +82,7 @@ def parse_args():
         help="the target KL divergence threshold")
     parser.add_argument("--device-ids", nargs="+", default=[],
         help="the device ids that subprocess workers will use")
-    parser.add_argument("--backend", type=str, default="gloo", choices=["gloo", "nccl", "mpi"],
+    parser.add_argument("--backend", type=str, default="nccl", choices=["gloo", "nccl", "mpi"],
         help="the id of the environment")
     args = parser.parse_args()
     args.batch_size = int(args.num_envs * args.num_steps)
@@ -231,7 +232,7 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs = torch.Tensor(envs.reset()).to(device)
+    next_obs = torch.Tensor(envs.reset()[0]).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
     num_updates = args.total_timesteps // (args.batch_size * world_size)
 
@@ -255,16 +256,16 @@ E.g., `torchrun --standalone --nnodes=1 --nproc_per_node=2 ppo_atari_multigpu.py
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            next_obs, reward, done, info = envs.step(action.cpu().numpy())
+            next_obs, reward, done, truncted, info = envs.step(action.cpu().numpy())
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(done).to(device)
-
-            for item in info:
-                if "episode" in item.keys() and local_rank == 0:
-                    print(f"global_step={global_step}, episodic_return={item['episode']['r']}")
-                    writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
-                    writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
-                    break
+            if local_rank == 0:
+                if "final_info" in info:
+                    for item in info["final_info"]:
+                        if item and "episode" in item:
+                            if "r" in item["episode"] and "l" in item["episode"]:
+                                writer.add_scalar("charts/episodic_return", item["episode"]["r"], global_step)
+                                writer.add_scalar("charts/episodic_length", item["episode"]["l"], global_step)
 
         print(
             f"local_rank: {local_rank}, action.sum(): {action.sum()}, update: {update}, agent.actor.weight.sum(): {agent.actor.weight.sum()}"
