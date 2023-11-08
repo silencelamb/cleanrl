@@ -75,6 +75,10 @@ def parse_args():
         help="the maximum norm for the gradient clipping")
     parser.add_argument("--target-kl", type=float, default=None,
         help="the target KL divergence threshold")
+    parser.add_argument("--model-type", type=str, default=None,
+        help="fixed model type, used in fix one graph mode")
+    parser.add_argument("--model-size", type=str, default=None,
+        help="fixed model size, used in fix one graph mode")
     parser.add_argument("--num-updates-per-graph", type=int, default=100,
         help="update the number times for one graph then switch to another graph")
     args = parser.parse_args()
@@ -270,25 +274,40 @@ if __name__ == "__main__":
     next_done = torch.zeros(args.num_envs).to(device)
     num_updates = args.total_timesteps // args.batch_size
     
+    envs.envs[0].env: WSCMappingEnv
     exception_caught = False  # Flag to indicate if an exception was caught
-    graph_num = envs.envs[0].env.num_graphs
-    cur_graph_idx = 0
-    print("Shuffling graphs")
-    envs.envs[0].env.shuffle_graphs(seed=args.seed)
+    fix_graph_mode = False
+    if args.model_type is not None and args.model_size is not None:
+        # Fix one graph mode
+        fix_graph_mode = True
+        print(f"Fixing graph to {args.model_type} {args.model_size}")
+        graph_data = envs.envs[0].env.get_graph_data_by_type_size(args.model_type, args.model_size).to(device)
+        for i in range(args.num_envs):
+            # for each env, set the model type and size, so that the env can get the correct reward
+            envs.envs[i].env.set_model_type_size(args.model_type, args.model_size)
+    else:
+        graph_num = envs.envs[0].env.num_graphs
+        cur_graph_idx = 0
+        print("Shuffling graphs")
+        envs.envs[0].env.shuffle_graphs(seed=args.seed)
 
     for update in range(1, num_updates + 1):
-        if update % args.num_updates_per_graph == 1:
-            # it is time to change a graph
-            print(f"Update: {update} Switching to Graph ID {cur_graph_idx}, Model: " +
-                  f"{envs.envs[0].env.GraphDataSet[cur_graph_idx].model_type} "+
-                  f"{envs.envs[0].env.GraphDataSet[cur_graph_idx].model_size}")
-            graph_data = envs.envs[0].env.get_graph_data(cur_graph_idx).to(device)
-            cur_graph_idx += 1
-        if cur_graph_idx == graph_num:
-            # it is time to shuffle graphs
-            print(f"Update: {update}, Shuffling graphs")
-            cur_graph_idx = 0
-            envs.envs[0].env.shuffle_graphs(seed=update+args.seed)
+        if not fix_graph_mode:
+            if update % args.num_updates_per_graph == 1:
+                # it is time to change a graph
+                model_type = envs.envs[0].env.GraphDataSet[cur_graph_idx].model_type
+                model_size = envs.envs[0].env.GraphDataSet[cur_graph_idx].model_size
+                print(f"Update: {update} Switching to Graph ID {cur_graph_idx}, Model: {model_type}{model_size}")
+                graph_data = envs.envs[0].env.get_graph_data_by_index(cur_graph_idx).to(device)
+                for i in range(args.num_envs):
+                    # for each env, set the model type and size, so that the env can get the correct reward
+                    envs.envs[i].env.set_model_type_size(model_type, model_size)
+                cur_graph_idx += 1
+            if cur_graph_idx == graph_num:
+                # it is time to shuffle graphs
+                print(f"Update: {update}, Shuffling graphs")
+                cur_graph_idx = 0
+                envs.envs[0].env.shuffle_graphs(seed=update+args.seed)
         
         if exception_caught:
             # Reset the environment and start over

@@ -246,7 +246,7 @@ if __name__ == "__main__":
         [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
     )
     # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-    graph_data = envs.envs[0].env.get_graph_data().to(device)
+    graph_data = envs.envs[0].env.get_graph_data_by_index().to(device)
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
