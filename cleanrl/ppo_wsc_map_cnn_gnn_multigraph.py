@@ -75,8 +75,8 @@ def parse_args():
         help="the maximum norm for the gradient clipping")
     parser.add_argument("--target-kl", type=float, default=None,
         help="the target KL divergence threshold")
-    parser.add_argument("--model-type", type=str, default=None,
-        help="fixed model type, used in fix one graph mode")
+    parser.add_argument("--model-type", type=str, choices=['gpt', 'bert', 'wresnet'],
+        help="fixed model type, used in fix one graph mode, only support gpt, bert, wresnet")
     parser.add_argument("--model-size", type=str, default=None,
         help="fixed model size, used in fix one graph mode")
     parser.add_argument("--num-updates-per-graph", type=int, default=100,

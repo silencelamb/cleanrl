@@ -26,6 +26,8 @@ def parse_args():
         help="the name of this experiment")
     parser.add_argument("--seed", type=int, default=1,
         help="seed of the experiment")
+    parser.add_argument("--gpuid", type=int, default=1,
+        help="gpu id")
     parser.add_argument("--torch-deterministic", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="if toggled, `torch.backends.cudnn.deterministic=False`")
     parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
@@ -36,19 +38,14 @@ def parse_args():
         help="the wandb's project name")
     parser.add_argument("--wandb-entity", type=str, default="pjlab-chip",
         help="the entity (team) of wandb's project")
-    parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
-        help="whether to capture videos of the agent performances (check out `videos` folder)")
-
     # Algorithm specific arguments
-    parser.add_argument("--env-id", type=str, default="CartPole-v1",
-        help="the id of the environment")
     parser.add_argument("--total-timesteps", type=int, default=500000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
     parser.add_argument("--num-envs", type=int, default=4,
         help="the number of parallel game environments")
-    parser.add_argument("--num-steps", type=int, default=30,
+    parser.add_argument("--num-steps", type=int, default=25,
         help="the number of steps to run in each environment per policy rollout")
     parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggle learning rate annealing for policy and value networks")
@@ -74,21 +71,34 @@ def parse_args():
         help="the maximum norm for the gradient clipping")
     parser.add_argument("--target-kl", type=float, default=None,
         help="the target KL divergence threshold")
+    parser.add_argument("--hardware", type=str, choices=['gpu', 'wsc', 'dojo', 'wsgpu'], 
+                        default="ws_gpu", help="hardware to use")
     parser.add_argument("--model-type", type=str, default="gpt",
         help="fixed model type, used in fix one graph mode")
     parser.add_argument("--model-size", type=str, default="350M",
         help="fixed model size, used in fix one graph mode")
+    parser.add_argument("--constrain-mem",  action="store_true",
+        help="whether to constrain memory usage")
+    parser.add_argument("--use-offload", action="store_true",
+                        help="use offload strategy (zero offoad -like)")
     args = parser.parse_args()
+    # when use use offload strategy, the memory contraint is off
+    if args.use_offload:
+        args.constrain_mem = False
+    if args.hardware == 'dojo':
+        args.num_steps = 25
+    elif args.hardware == 'wsgpu':
+        args.num_steps = 24
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     # fmt: on
     return args
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
+def make_env(seed, **kwargs):
     def thunk():
         
-        env = WSCMappingEnv(use_image=True)
+        env = WSCMappingEnv(**kwargs)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         # env.seed(seed)
         env.action_space.seed(seed)
@@ -163,7 +173,8 @@ class Agent(nn.Module):
 
 if __name__ == "__main__":
     args = parse_args()
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    run_name = f"{args.exp_name}_{args.hardware}_{args.model_type}{args.model_size}"+\
+        f"_mem{args.constrain_mem}_offload{args.use_offload}_{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
 
@@ -188,11 +199,17 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device("cuda:6" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device(f"cuda:{args.gpuid}" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
+        [make_env(args.seed + i,
+                  use_image=True,
+                  hardware=args.hardware,
+                  offload=args.use_offload,
+                  constrain_mem=args.constrain_mem
+                  ) \
+                      for i in range(args.num_envs)]
     )
     # assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
