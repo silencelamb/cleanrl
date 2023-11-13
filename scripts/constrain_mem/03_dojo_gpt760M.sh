@@ -12,25 +12,24 @@ model_sizes["bert"]="Tiny Mini Small Medium Base Large LL LLL LLLL"
 model_sizes["wresnet"]="25.56M 44.55M 60.19M 68.88M 126.88M"
 
 cd ..
-# python cleanrl/ppo_wsc_map_cnn.py \
-#     --hardware wsgpu \
-#     --model-type gpt \
-#     --model-size 1.3B \
-#     --gpuid 1 \
-#     --constrain-mem \
-#     --seed 65536 \
-#     --total-timesteps 50000
-#     --track
-
 python cleanrl/ppo_wsc_map_cnn.py \
     --hardware dojo \
-    --model-type bert \
-    --model-size Base \
-    --gpuid 6 \
-    --use-offload \
+    --model-type gpt \
+    --model-size 760M \
+    --gpuid 4 \
+    --constrain-mem \
     --seed 65536 \
     --total-timesteps 250000 \
     --track
+
+# python cleanrl/ppo_wsc_map_cnn.py \
+#     --hardware wsgpu \
+#     --model-type bert \
+#     --model-size Large \
+#     --gpuid 3 \
+#     --seed 65536 \
+#     --total-timesteps 50000
+    # --track
 
 # python cleanrl/ppo_wsc_map_cnn.py \
 #     --hardware wsgpu \

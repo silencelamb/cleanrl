@@ -38,6 +38,6 @@ python cleanrl/ppo_wsc_map_cnn.py \
     --model-size 60.19M \
     --gpuid 4 \
     --seed 65536 \
-    --constrain-mem \
-    --total-timesteps 50000 \
+    --use-offload \
+    --total-timesteps 250000 \
     --track

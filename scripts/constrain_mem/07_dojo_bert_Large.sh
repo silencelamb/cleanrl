@@ -25,9 +25,9 @@ cd ..
 python cleanrl/ppo_wsc_map_cnn.py \
     --hardware dojo \
     --model-type bert \
-    --model-size Base \
-    --gpuid 6 \
-    --use-offload \
+    --model-size Large \
+    --gpuid 7 \
+    --constrain-mem \
     --seed 65536 \
     --total-timesteps 250000 \
     --track

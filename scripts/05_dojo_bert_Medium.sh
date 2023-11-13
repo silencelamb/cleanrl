@@ -27,9 +27,9 @@ python cleanrl/ppo_wsc_map_cnn.py \
     --model-type bert \
     --model-size Medium \
     --gpuid 6 \
-    --constrain-mem \
+    --use-offload \
     --seed 65536 \
-    --total-timesteps 50000 \
+    --total-timesteps 250000 \
     --track
 
 # python cleanrl/ppo_wsc_map_cnn.py \

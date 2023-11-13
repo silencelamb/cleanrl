@@ -18,7 +18,6 @@ sys.path.insert(0, "../simple/")
 from mapping_simple_action_mask_ave_env import MappingSimpleActionMaskALLAVEEnv
 
 
-
 def parse_args():
     # fmt: off
     parser = argparse.ArgumentParser()

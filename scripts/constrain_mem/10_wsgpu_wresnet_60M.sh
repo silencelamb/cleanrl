@@ -22,21 +22,22 @@ cd ..
 #     --total-timesteps 50000
 #     --track
 
-python cleanrl/ppo_wsc_map_cnn.py \
-    --hardware dojo \
-    --model-type bert \
-    --model-size Base \
-    --gpuid 6 \
-    --use-offload \
-    --seed 65536 \
-    --total-timesteps 250000 \
-    --track
-
 # python cleanrl/ppo_wsc_map_cnn.py \
 #     --hardware wsgpu \
-#     --model-type wresnet \
-#     --model-size 44.55M \
-#     --gpuid 5 \
+#     --model-type bert \
+#     --model-size Large \
+#     --gpuid 7 \
+#     --constrain-mem \
 #     --seed 65536 \
 #     --total-timesteps 50000
-    # --track
+#     --track
+
+python cleanrl/ppo_wsc_map_cnn.py \
+    --hardware wsgpu \
+    --model-type wresnet \
+    --model-size 60.19M \
+    --gpuid 4 \
+    --seed 65536 \
+    --constrain-mem \
+    --total-timesteps 250000 \
+    --track
