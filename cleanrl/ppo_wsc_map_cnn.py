@@ -219,7 +219,7 @@ if __name__ == "__main__":
     logger.info(f'args: {args}')
 
     run_name = f"{args.exp_name}_{args.hardware}_{args.model_type}{args.model_size}_micro{args.micro_batchsize}"+ \
-        f"_mem{args.constrain_mem}_offload{args.use_offload}_{args.seed}__{int(time.time())}"
+        f"_mem{args.constrain_mem}_offload{args.use_offload}_{args.seed}_{date_str}"
     if args.track:
         import wandb
 
