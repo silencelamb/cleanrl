@@ -16,8 +16,7 @@ python cleanrl/ppo_wsc_map_cnn.py \
     --hardware wsgpu \
     --model-type gpt \
     --model-size 1.3B \
-    --gpuid 1 \
-    --use-offload \
+    --gpuid 7 \
     --seed 65536 \
     --total-timesteps 250000 \
     --track

@@ -3,7 +3,9 @@ import argparse
 import os
 import random
 import time
+from datetime import datetime
 from distutils.util import strtobool
+import logging
 
 import gymnasium as gym
 # import gym
@@ -17,6 +19,39 @@ import sys
 sys.path.insert(0, "../")
 from mapping_env import WSCMappingEnv
 
+def get_root_logger(log_file, log_level=logging.DEBUG):
+    """
+    获取或创建名为 'ppo_wac_map_cnn' 的 logger。
+    如果该 logger 不存在，它将被创建并配置。
+
+    :param log_level: 日志级别
+    :return: 配置好的 logger 对象
+    """
+    logger = logging.getLogger('ppo_wac_map_cnn')
+    
+    # 如果 logger 尚未配置
+    if not logger.handlers:
+        
+        logger.setLevel(log_level)  # 设置日志级别
+        
+        # 创建一个handler，用于输出到控制台
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.DEBUG)
+
+        # 创建一个handler，用于写入日志文件
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.DEBUG)
+
+        # 定义handler的输出格式
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(formatter)
+        file_handler.setFormatter(formatter)
+        
+        # 给logger添加handler
+        logger.addHandler(console_handler)
+        logger.addHandler(file_handler)
+
+    return logger
 
 
 def parse_args():
@@ -81,6 +116,9 @@ def parse_args():
         help="whether to constrain memory usage")
     parser.add_argument("--use-offload", action="store_true",
                         help="use offload strategy (zero offoad -like)")
+    parser.add_argument("--micro-batchsize", type=int,
+                        help="micro batchsize")
+    parser.add_argument("--rst-folder", type=str, default="")
     args = parser.parse_args()
     # when use use offload strategy, the memory contraint is off
     if args.use_offload:
@@ -172,8 +210,15 @@ class Agent(nn.Module):
 
 
 if __name__ == "__main__":
+    global_config = {}
     args = parse_args()
-    run_name = f"{args.exp_name}_{args.hardware}_{args.model_type}{args.model_size}"+\
+    date_str = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    args.rst_folder = f"{args.rst_folder}/{args.hardware}-{args.model_type}-{args.model_size}-{args.micro_batchsize}-{date_str}"
+    os.makedirs(args.rst_folder, exist_ok=True)
+    logger = get_root_logger(log_file=f"{args.rst_folder}/log.txt")
+    logger.info(f'args: {args}')
+
+    run_name = f"{args.exp_name}_{args.hardware}_{args.model_type}{args.model_size}_micro{args.micro_batchsize}"+ \
         f"_mem{args.constrain_mem}_offload{args.use_offload}_{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -207,7 +252,8 @@ if __name__ == "__main__":
                   use_image=True,
                   hardware=args.hardware,
                   offload=args.use_offload,
-                  constrain_mem=args.constrain_mem
+                  constrain_mem=args.constrain_mem,
+                  logger=logger,
                   ) \
                       for i in range(args.num_envs)]
     )
@@ -215,8 +261,8 @@ if __name__ == "__main__":
 
     for i in range(args.num_envs):
         # set the model type and size, so that the env can get the correct reward
-        print(f"Using {args.model_type} {args.model_size}")
-        envs.envs[i].env.set_model_type_size(args.model_type, args.model_size)
+        print(f"Using {args.model_type} {args.model_size} {args.micro_batchsize}")
+        envs.envs[i].env.set_model_type_size(args.model_type, args.model_size, args.micro_batchsize)
         
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
